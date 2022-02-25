@@ -1,11 +1,10 @@
-from black import out
 import torch
-import matplotlib.pyplot as plt
 from torch.autograd import Function
 from torchvision import models
 from torchvision import utils
 import cv2
 import sys
+sys.path.append("..")
 from collections import OrderedDict
 import numpy as np
 import argparse
@@ -14,15 +13,17 @@ import torch.nn as nn
 from models import hmr
 import config
 
-mean_params = np.load(config.SMPL_MEAN_PARAMS)
+data_path = '../' + config.SMPL_MEAN_PARAMS
+mean_params = np.load(data_path)
 init_pose = torch.from_numpy(mean_params['pose'][:]).unsqueeze(0)
 init_shape = torch.from_numpy(mean_params['shape'][:].astype('float32')).unsqueeze(0)
 init_cam = torch.from_numpy(mean_params['cam']).unsqueeze(0)
 
 i=0##testing in what
-hmr_model = hmr(config.SMPL_MEAN_PARAMS, pretrained=False)
-checkpoint = torch.load('model_checkpoint.pt', map_location='cpu')
+hmr_model = hmr(data_path, pretrained=False)
+checkpoint = torch.load("/workspace/shanshanguo/project/spin_ze/logs/train_example/checkpoints/2022_02_16-05_43_45.pt", map_location='cpu')
 hmr_model.load_state_dict(checkpoint['model'], strict=False)
+hmr_model.eval()
 #for name in hmr_model.state_dict():
 #	print(name)
 #	print(hmr_model.state_dict()[name])
@@ -50,8 +51,6 @@ class FeatureExtractor():
                 outputs += [x]
             #print('outputs.size()=',x.size())
         #print('len(outputs)',len(outputs))
-        print(self.gradients)
-        print('1111')
         return outputs, x
 
 class ModelOutputs():
@@ -80,7 +79,7 @@ class ModelOutputs():
 		else:
 			#output = hmr_model.regressor(output)##这里对应use-cuda上更正一些bug,不然用use-cuda的时候会导致类型对不上,这样保证既可以在cpu上运行,gpu上运行也不会出问题.
 			pred_rotmat, pred_shape, pred_cam = hmr_model.regressor(output, init_pose, init_shape, init_cam, n_iter=3)
-		return target_activations, pred_cam
+		return target_activations, pred_shape
 
 def preprocess_image(img):
 	means=[0.485, 0.456, 0.406]
@@ -137,17 +136,11 @@ class GradCam:
 		if self.cuda:
 			one_hot = torch.sum(one_hot.cuda() * output)
 		else:
-			print(one_hot, output)
-			print(one_hot * output)
 			one_hot = torch.sum(one_hot * output)
-			print(one_hot)
 
 		self.model.zero_grad()##features和classifier不包含，可以重新加回去试一试，会报错不包含这个对象。
 		#self.model.zero_grad()
 		one_hot.backward(retain_graph=True)##这里适配我们的torch0.4及以上，我用的1.0也可以完美兼容。（variable改成graph即可）
-		print(one_hot)
-		print(self.extractor.get_gradients())
-		print('2222')
 		grads_val = self.extractor.get_gradients()[-1].cpu().data.numpy()
 		#print('grads_val',grads_val.shape)
 		target = features[-1]
@@ -233,9 +226,9 @@ if __name__ == '__main__':
 	# Can work with any model, but it assumes that the model has a 
 	# feature method, and a classifier method,
 	# as in the VGG models in torchvision.
-	model = hmr(config.SMPL_MEAN_PARAMS, pretrained=False)
+	model = hmr(data_path, pretrained=False)
 
-	checkpoint = torch.load('model_checkpoint.pt', map_location='cpu')
+	checkpoint = torch.load("/workspace/shanshanguo/project/spin_ze/logs/train_example/checkpoints/2022_02_16-05_43_45.pt", map_location='cpu')
 	model.load_state_dict(checkpoint['model'], strict=False)
 
 
@@ -268,7 +261,7 @@ if __name__ == '__main__':
 		i=i+1 
 		show_cam_on_image(img, mask,i)
 
-		gb_model = GuidedBackpropReLUModel(model = models.resnet50(pretrained=True), use_cuda=args.use_cuda)
+		gb_model = GuidedBackpropReLUModel(model = models.resnet50(pretrained = True), use_cuda=args.use_cuda)
 		gb = gb_model(input, index=target_index)
 		if not os.path.exists('gb'):
 			os.mkdir('gb')
