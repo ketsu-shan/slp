@@ -1,12 +1,14 @@
 import torch
+import matplotlib.pyplot as plt
 from torch.autograd import Function
 from torchvision import models
 from torchvision import utils
 import cv2
 import sys
-sys.path.append("..")
+sys.path.append('..')
 from collections import OrderedDict
 import numpy as np
+from torch.autograd import Variable
 import argparse
 import os
 import torch.nn as nn
@@ -18,10 +20,10 @@ mean_params = np.load(data_path)
 init_pose = torch.from_numpy(mean_params['pose'][:]).unsqueeze(0)
 init_shape = torch.from_numpy(mean_params['shape'][:].astype('float32')).unsqueeze(0)
 init_cam = torch.from_numpy(mean_params['cam']).unsqueeze(0)
-
+print(init_shape.size())
 i=0##testing in what
 hmr_model = hmr(data_path, pretrained=False)
-checkpoint = torch.load("/workspace/shanshanguo/project/spin_ze/logs/train_example/checkpoints/2022_02_16-05_43_45.pt", map_location='cpu')
+checkpoint = torch.load('../model_checkpoint.pt', map_location='cpu')
 hmr_model.load_state_dict(checkpoint['model'], strict=False)
 hmr_model.eval()
 #for name in hmr_model.state_dict():
@@ -126,9 +128,9 @@ class GradCam:
 		if index == None:
 			# 选择最大的数值索引
 			index = np.argmax(output.cpu().data.numpy())
-			print('********')
-			print(index)
-
+			
+		print('********')
+		print('index=',index)
 		one_hot = np.zeros((1, output.size()[-1]), dtype = np.float32)
 		one_hot[0][index] = 1
 		one_hot = torch.Tensor(torch.from_numpy(one_hot))
@@ -165,6 +167,7 @@ class GuidedBackpropReLUModel:
 		self.model = model#这里同理，要的是一个完整的网络，不然最后维度会不匹配。
 		self.model.eval()
 		self.cuda = use_cuda
+		k = 1
 		if self.cuda:
 			self.model = model.cuda()
 		for module in self.model.named_modules():
@@ -173,25 +176,26 @@ class GuidedBackpropReLUModel:
 	def bp_relu(self, module, grad_in, grad_out):
 		if isinstance(module, nn.ReLU):
 			return (torch.clamp(grad_in[0], min=0.0),)
-	def forward(self, input):
-		return self.model(input)
+	def forward(self, input, init_pose=None, init_shape=None, init_cam=None, n_iter=3):
+		input = Variable(torch.unsqueeze(input, dim=0).float(), requires_grad=False)
+		return self.model(input, init_pose, init_shape, init_cam, n_iter)
 
 	def __call__(self, input, index = None):
 		if self.cuda:
-			output = self.forward(input.cuda())
+			pred_rotmat, pred_shape, pred_cam = self.forward(input.cuda())
 		else:
-			output = self.forward(input)
+			pred_rotmat, pred_shape, pred_cam = self.forward(input, init_pose, init_shape, init_cam, n_iter=3)
 		if index == None:
-			index = np.argmax(output.cpu().data.numpy())
+			index = np.argmax(pred_shape.cpu().data.numpy())
 		#print(input.grad)
-		one_hot = np.zeros((1, output.size()[-1]), dtype = np.float32)
+		one_hot = np.zeros((1, pred_shape.size()[-1]), dtype = np.float32)
 		one_hot[0][index] = 1
 		one_hot = torch.from_numpy(one_hot)
 		one_hot.requires_grad = True
 		if self.cuda:
-			one_hot = torch.sum(one_hot.cuda() * output)
+			one_hot = torch.sum(one_hot.cuda() * pred_shape)
 		else:
-			one_hot = torch.sum(one_hot * output)
+			one_hot = torch.sum(one_hot * pred_shape)
 		#self.model.classifier.zero_grad()
 		one_hot.backward(retain_graph=True)
 		output = input.grad.cpu().data.numpy()
@@ -228,11 +232,10 @@ if __name__ == '__main__':
 	# as in the VGG models in torchvision.
 	model = hmr(data_path, pretrained=False)
 
-	checkpoint = torch.load("/workspace/shanshanguo/project/spin_ze/logs/train_example/checkpoints/2022_02_16-05_43_45.pt", map_location='cpu')
+	checkpoint = torch.load('../model_checkpoint.pt', map_location='cpu')
 	model.load_state_dict(checkpoint['model'], strict=False)
 
-
-
+	model.eval()
 	del model.regressor
 	#modules = list(resnet.children())[:-1]
 	#model = torch.nn.Sequential(*modules)
@@ -251,25 +254,24 @@ if __name__ == '__main__':
 		img = np.float32(cv2.resize(img, (224, 224))) / 255
 		input = preprocess_image(img)
 		input.required_grad = True
-		print('input.size()=',input.size())
 	# If None, returns the map for the highest scoring category.
 	# Otherwise, targets the requested index.
-		target_index =None
+		for target_index in range(0, init_shape.size()[1]):
+			mask = grad_cam(input, target_index)
 
-		mask = grad_cam(input, target_index)
+			i=i+1 
+			show_cam_on_image(img, mask,i)
 
-		i=i+1 
-		show_cam_on_image(img, mask,i)
-
-		gb_model = GuidedBackpropReLUModel(model = models.resnet50(pretrained = True), use_cuda=args.use_cuda)
-		gb = gb_model(input, index=target_index)
-		if not os.path.exists('gb'):
-			os.mkdir('gb')
-		if not os.path.exists('camgb'):
-			os.mkdir('camgb')
-		utils.save_image(torch.from_numpy(gb), 'gb/gb_{}.jpg'.format(i))
-		cam_mask = np.zeros(gb.shape)
-		for j in range(0, gb.shape[0]):
-			cam_mask[j, :, :] = mask
-		cam_gb = np.multiply(cam_mask, gb)
-		utils.save_image(torch.from_numpy(cam_gb), 'camgb/cam_gb_{}.jpg'.format(i))
+			
+			gb_model = GuidedBackpropReLUModel(model = hmr_model, use_cuda=args.use_cuda)
+			gb = gb_model(input, index=target_index)
+			if not os.path.exists('gb'):
+				os.mkdir('gb')
+			if not os.path.exists('camgb'):
+				os.mkdir('camgb')
+			utils.save_image(torch.from_numpy(gb), 'gb/gb_{}.jpg'.format(i))
+			cam_mask = np.zeros(gb.shape)
+			for j in range(0, gb.shape[0]):
+				cam_mask[j, :, :] = mask
+			cam_gb = np.multiply(cam_mask, gb)
+			utils.save_image(torch.from_numpy(cam_gb), 'camgb/cam_gb_{}.jpg'.format(i))
