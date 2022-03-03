@@ -20,7 +20,7 @@ mean_params = np.load(data_path)
 init_pose = torch.from_numpy(mean_params['pose'][:]).unsqueeze(0)
 init_shape = torch.from_numpy(mean_params['shape'][:].astype('float32')).unsqueeze(0)
 init_cam = torch.from_numpy(mean_params['cam']).unsqueeze(0)
-print(init_shape.size())
+print(init_pose.size())
 i=0##testing in what
 hmr_model = hmr(data_path, pretrained=False)
 checkpoint = torch.load('../model_checkpoint.pt', map_location='cpu')
@@ -81,7 +81,11 @@ class ModelOutputs():
 		else:
 			#output = hmr_model.regressor(output)##这里对应use-cuda上更正一些bug,不然用use-cuda的时候会导致类型对不上,这样保证既可以在cpu上运行,gpu上运行也不会出问题.
 			pred_rotmat, pred_shape, pred_cam = hmr_model.regressor(output, init_pose, init_shape, init_cam, n_iter=3)
-		return target_activations, pred_shape
+			print(pred_rotmat.shape)
+			pred_rotmat = pred_rotmat.view(pred_rotmat.size(0), -1)
+			output = pred_shape
+			print(output.size())
+		return target_activations, output
 
 def preprocess_image(img):
 	means=[0.485, 0.456, 0.406]
@@ -101,10 +105,13 @@ def preprocess_image(img):
 
 def show_cam_on_image(img, mask,name):
 	heatmap = cv2.applyColorMap(np.uint8(255*mask), cv2.COLORMAP_JET)
+	
 	heatmap = np.float32(heatmap) / 255
 	cam = heatmap + np.float32(img)
+	
 	cam = cam / np.max(cam)
 	cv2.imwrite("cam/cam_{}.jpg".format(name), np.uint8(255 * cam))
+	#cv2.imwrite("cam/cam_{}.jpg".format(name), np.uint8(255 * cam))
 class GradCam:
 	def __init__(self, model, target_layer_names, use_cuda):
 		self.model = model
@@ -185,17 +192,19 @@ class GuidedBackpropReLUModel:
 			pred_rotmat, pred_shape, pred_cam = self.forward(input.cuda())
 		else:
 			pred_rotmat, pred_shape, pred_cam = self.forward(input, init_pose, init_shape, init_cam, n_iter=3)
+			pred_rotmat = pred_rotmat.view(pred_rotmat.size(0), -1)
+		output = pred_shape
 		if index == None:
-			index = np.argmax(pred_shape.cpu().data.numpy())
+			index = np.argmax(output.cpu().data.numpy())
 		#print(input.grad)
-		one_hot = np.zeros((1, pred_shape.size()[-1]), dtype = np.float32)
+		one_hot = np.zeros((1, output.size()[-1]), dtype = np.float32)
 		one_hot[0][index] = 1
 		one_hot = torch.from_numpy(one_hot)
 		one_hot.requires_grad = True
 		if self.cuda:
-			one_hot = torch.sum(one_hot.cuda() * pred_shape)
+			one_hot = torch.sum(one_hot.cuda() * output)
 		else:
-			one_hot = torch.sum(one_hot * pred_shape)
+			one_hot = torch.sum(one_hot * output)
 		#self.model.classifier.zero_grad()
 		one_hot.backward(retain_graph=True)
 		output = input.grad.cpu().data.numpy()
@@ -225,7 +234,7 @@ if __name__ == '__main__':
 	and computes intermediate activations.
 	Makes the visualization. """
 
-	args = get_args()
+	args = get_args() 
 
 	# Can work with any model, but it assumes that the model has a 
 	# feature method, and a classifier method,
@@ -256,22 +265,18 @@ if __name__ == '__main__':
 		input.required_grad = True
 	# If None, returns the map for the highest scoring category.
 	# Otherwise, targets the requested index.
+		# shape
+		
+		mask_sum = np.zeros((224,224))
 		for target_index in range(0, init_shape.size()[1]):
+			i=i+1
 			mask = grad_cam(input, target_index)
-
-			i=i+1 
 			show_cam_on_image(img, mask,i)
+			cv2.imwrite("cam/cam_{}.jpg".format(i+10), np.uint8(255 * mask))
+			mask_sum += mask
+			cv2.imwrite("cam/cam_{}.jpg".format(i+100), np.uint8(255 * mask_sum))
+			mask_sum1 = mask_sum / np.max(mask_sum)
+			cv2.imwrite("cam/cam_{}.jpg".format(i+1000), np.uint8(255 * mask_sum1))
 
-			
-			gb_model = GuidedBackpropReLUModel(model = hmr_model, use_cuda=args.use_cuda)
-			gb = gb_model(input, index=target_index)
-			if not os.path.exists('gb'):
-				os.mkdir('gb')
-			if not os.path.exists('camgb'):
-				os.mkdir('camgb')
-			utils.save_image(torch.from_numpy(gb), 'gb/gb_{}.jpg'.format(i))
-			cam_mask = np.zeros(gb.shape)
-			for j in range(0, gb.shape[0]):
-				cam_mask[j, :, :] = mask
-			cam_gb = np.multiply(cam_mask, gb)
-			utils.save_image(torch.from_numpy(cam_gb), 'camgb/cam_gb_{}.jpg'.format(i))
+		cv2.imwrite("cam/cam_{}.jpg".format(i+10000), np.uint8(25.5 * mask_sum))
+		
